@@ -254,17 +254,17 @@ class App:
 def main():
     global SPRITE_DIRS
     p = argparse.ArgumentParser(description="Random spacebar-mash quick-time events.")
-    p.add_argument("--min-interval", type=int, default=120, help="min seconds between events (default 120)")
-    p.add_argument("--max-interval", type=int, default=900, help="max seconds between events (default 900)")
-    p.add_argument("--min-presses", type=int, default=10, help="fewest space presses needed (default 10)")
-    p.add_argument("--max-presses", type=int, default=30, help="most space presses needed (default 30)")
-    p.add_argument("--seconds-per-press", type=float, default=0.3,
+    p.add_argument("--min-interval", type=int, default=30, help="min seconds between events (default 30)")
+    p.add_argument("--max-interval", type=int, default=120, help="max seconds between events (default 120)")
+    p.add_argument("--min-presses", type=int, default=33, help="fewest space presses needed (default 33)")
+    p.add_argument("--max-presses", type=int, default=100, help="most space presses needed (default 100)")
+    p.add_argument("--seconds-per-press", type=float, default=0.2,
                    help="time allowed per required press (default 0.3)")
     p.add_argument("--min-time", type=float, default=3.0, help="minimum time limit in seconds (default 3)")
-    p.add_argument("--flash-ms", type=int, default=10, help="milliseconds between sprite flashes (default 10)")
-    p.add_argument("--success-seconds", type=float, default=3.0, help="how long the success sprite stays (default 3)")
-    p.add_argument("--fail-seconds", type=float, default=3.0, help="how long the fail sprite stays (default 3)")
-    p.add_argument("--size", type=int, default=512, help="max sprite size in pixels (default 256)")
+    p.add_argument("--flash-ms", type=int, default=20, help="milliseconds between sprite flashes (default 20)")
+    p.add_argument("--success-seconds", type=float, default=6.0, help="how long the success sprite stays (default 6)")
+    p.add_argument("--fail-seconds", type=float, default=6.0, help="how long the fail sprite stays (default 6)")
+    p.add_argument("--size", type=int, default=1024, help="max sprite size in pixels (default 1024)")
     p.add_argument("--no-hud", action="store_true", help="hide the press counter and timer bar")
     p.add_argument("--no-grab", action="store_true", help="don't grab the keyboard (popup needs focus instead)")
     p.add_argument("--sprites", metavar="DIR", help="sprite directory to try first")
