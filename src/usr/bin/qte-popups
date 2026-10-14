@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""qte-popups: random spacebar-mash quick-time events with flashing sprites."""
+import argparse, random, sys, time
+from pathlib import Path
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+CSS = b"""
+window.qte.solid { background-color: rgba(15,15,20,0.95); border: 3px solid #f5c542; border-radius: 14px; }
+window.qte.solid.ok { border-color: #3ddc84; }
+window.qte.solid.fail { border-color: #ff4d4d; }
+window.qte.clear { background-color: transparent; }
+.sprite-text { color: #f5c542; font-size: 36pt; font-weight: 900; }
+.sprite-text.ok { color: #3ddc84; }
+.sprite-text.fail { color: #ff4d4d; }
+.hud { color: white; font-size: 13pt; font-weight: bold; background-color: rgba(0,0,0,0.65);
+       border-radius: 8px; padding: 2px 12px; }
+progressbar trough { min-height: 10px; background-color: #333; border-radius: 5px; }
+progressbar progress { min-height: 10px; background-color: #f5c542; border-radius: 5px; }
+"""
+
+# sprite key -> file name, and the text shown if that file is missing
+FILES = {"flash_a": "flash_a.png", "flash_b": "flash_b.png",
+         "success": "success.png", "fail": "fail.png"}
+FALLBACK = {"flash_a": "SPACE!", "flash_b": "SPACE!!", "success": "NICE!", "fail": "FAILED"}
+
+SPRITE_DIRS = []   # filled in main()
+
+def default_sprite_dirs(extra=None):
+    dirs = [Path(extra)] if extra else []
+    dirs.append(Path.home() / ".local/share/qte-popups/sprites")
+    dirs.append(Path("/usr/share/qte-popups/sprites"))
+    dirs.append(Path(__file__).resolve().parent.parent / "share/qte-popups/sprites")
+    return dirs
+
+def load_pixbuf(filename, size):
+    """Load a sprite, shrinking (never enlarging) it to fit size x size. None if missing."""
+    for d in SPRITE_DIRS:
+        p = d / filename
+        if p.is_file():
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file(str(p))
+            except GLib.Error:
+                continue
+            w, h = pb.get_width(), pb.get_height()
+            s = min(1.0, size / w, size / h)
+            if s < 1.0:
+                pb = pb.scale_simple(max(1, int(w * s)), max(1, int(h * s)),
+                                     GdkPixbuf.InterpType.BILINEAR)
+            return pb
+    return None
+
+class SpriteView(Gtk.Box):
+    """Fixed-size area that shows a sprite, or a text fallback if the PNG is missing."""
+    def __init__(self, size):
+        super().__init__()
+        self.set_size_request(size, size)
+        self.image = Gtk.Image()
+        self.label = Gtk.Label()
+        self.label.get_style_context().add_class("sprite-text")
+        for w in (self.image, self.label):
+            w.set_no_show_all(True)
+            w.set_halign(Gtk.Align.CENTER)
+            w.set_valign(Gtk.Align.CENTER)
+            self.pack_start(w, True, True, 0)
+
+    def show_sprite(self, key, pixbuf):
+        if pixbuf:
+            self.image.set_from_pixbuf(pixbuf)
+            self.image.show()
+            self.label.hide()
+        else:
+            ctx = self.label.get_style_context()
+            ctx.remove_class("ok"); ctx.remove_class("fail")
+            if key == "success": ctx.add_class("ok")
+            if key == "fail": ctx.add_class("fail")
+            self.label.set_text(FALLBACK[key])
+            self.label.show()
+            self.image.hide()
+
+class QTE(Gtk.Window):
+    def __init__(self, a, on_done):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.a, self.on_done = a, on_done
+        self.finished, self.space_down, self.flip = False, False, False
+        self.presses = 0
+        self.needed = random.randint(a.min_presses, a.max_presses)
+        self.limit = max(a.min_time, self.needed * a.seconds_per_press)
+        self.start = time.monotonic()
+        self.pix = {k: load_pixbuf(f, a.size) for k, f in FILES.items()}
+        self.grab_wanted = not a.no_grab
+
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_resizable(False)
+        # With a keyboard grab the popup never needs focus, so it won't steal your window.
+        self.set_accept_focus(not self.grab_wanted)
+        self.set_focus_on_map(not self.grab_wanted)
+
+        screen = Gdk.Screen.get_default()
+        visual = screen.get_rgba_visual()
+        ctx = self.get_style_context()
+        ctx.add_class("qte")
+        if visual and screen.is_composited():
+            self.set_visual(visual); self.set_app_paintable(True); ctx.add_class("clear")
+        else:
+            ctx.add_class("solid")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=14)
+        self.sprite = SpriteView(a.size)
+        box.pack_start(self.sprite, False, False, 0)
+        self.hud = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.count = Gtk.Label(label=self._count_text())
+        self.count.get_style_context().add_class("hud")
+        self.count.set_halign(Gtk.Align.CENTER)
+        self.bar = Gtk.ProgressBar(); self.bar.set_fraction(1.0)
+        self.hud.pack_start(self.count, False, False, 0)
+        self.hud.pack_start(self.bar, False, False, 0)
+        self.hud.set_no_show_all(a.no_hud)
+        box.pack_start(self.hud, False, False, 0)
+        self.add(box)
+
+        self.add_events(Gdk.EventMask.KEY_PRESS_MASK | Gdk.EventMask.KEY_RELEASE_MASK)
+        self.connect("key-press-event", self.on_press)
+        self.connect("key-release-event", self.on_release)
+
+        self.sprite.show_sprite("flash_a", self.pix["flash_a"])
+        self.show_all()
+        disp = Gdk.Display.get_default()
+        area = (disp.get_primary_monitor() or disp.get_monitor(0)).get_workarea()
+        w, h = self.get_size()
+        self.move(random.randint(area.x, max(area.x, area.x + area.width - w)),
+                  random.randint(area.y, max(area.y, area.y + area.height - h)))
+        if self.grab_wanted:
+            GLib.timeout_add(30, self._try_grab, 0)
+        else:
+            self.present_with_time(Gdk.CURRENT_TIME)
+        GLib.timeout_add(a.flash_ms, self.flash)
+        GLib.timeout_add(30, self.tick)
+
+    def _count_text(self):
+        return f"{self.presses} / {self.needed}"
+
+    def _try_grab(self, tries):
+        if self.finished:
+            return False
+        gw = self.get_window()
+        if gw is not None and gw.is_viewable():
+            try:
+                seat = Gdk.Display.get_default().get_default_seat()
+                st = seat.grab(gw, Gdk.SeatCapabilities.KEYBOARD, True, None, None, None, None)
+                if st == Gdk.GrabStatus.SUCCESS:
+                    return False
+            except Exception:
+                pass
+        if tries < 10:
+            GLib.timeout_add(60, self._try_grab, tries + 1)
+        else:   # couldn't grab (e.g. Wayland): fall back to normal focus
+            print("qte-popups: keyboard grab failed, falling back to focus", file=sys.stderr)
+            self.set_accept_focus(True)
+            self.present_with_time(Gdk.CURRENT_TIME)
+        return False
+
+    def _ungrab(self):
+        try:
+            Gdk.Display.get_default().get_default_seat().ungrab()
+        except Exception:
+            pass
+
+    def flash(self):
+        if self.finished:
+            return False
+        self.flip = not self.flip
+        key = "flash_b" if self.flip else "flash_a"
+        self.sprite.show_sprite(key, self.pix[key])
+        return True
+
+    def tick(self):
+        if self.finished:
+            return False
+        left = self.limit - (time.monotonic() - self.start)
+        self.bar.set_fraction(max(0.0, left / self.limit))
+        if left <= 0:
+            self.finish(False)
+            return False
+        return True
+
+    def on_press(self, _w, ev):
+        if self.finished:
+            return True
+        name = (Gdk.keyval_name(ev.keyval) or "").lower()
+        if name == "space":
+            if self.space_down:          # ignore key auto-repeat: you must really mash
+                return True
+            self.space_down = True
+            self.presses += 1
+            self.count.set_text(self._count_text())
+            if self.presses >= self.needed:
+                self.finish(True)
+        elif name == "escape":
+            self.dismiss()
+        return True
+
+    def on_release(self, _w, ev):
+        if (Gdk.keyval_name(ev.keyval) or "").lower() == "space":
+            self.space_down = False
+        return True
+
+    def finish(self, success):
+        if self.finished:
+            return
+        self.finished = True
+        self._ungrab()                   # keys go back to your other windows right away
+        self.hud.hide()
+        self.get_style_context().add_class("ok" if success else "fail")
+        key = "success" if success else "fail"
+        self.sprite.show_sprite(key, self.pix[key])
+        secs = self.a.success_seconds if success else self.a.fail_seconds
+        GLib.timeout_add(int(secs * 1000), self._close)
+
+    def dismiss(self):
+        if not self.finished:
+            self.finished = True
+            self._ungrab()
+            self._close()
+
+    def _close(self):
+        self.destroy()
+        self.on_done()
+        return False
+
+class App:
+    def __init__(self, a):
+        self.a, self.active = a, None
+
+    def schedule(self, first=None):
+        secs = first if first is not None else random.randint(self.a.min_interval, self.a.max_interval)
+        GLib.timeout_add_seconds(secs, self.spawn)
+
+    def spawn(self):
+        if self.active is None:
+            self.active = QTE(self.a, self.done)
+        return False
+
+    def done(self):
+        self.active = None
+        self.schedule()
+
+def main():
+    global SPRITE_DIRS
+    p = argparse.ArgumentParser(description="Random spacebar-mash quick-time events.")
+    p.add_argument("--min-interval", type=int, default=120, help="min seconds between events (default 120)")
+    p.add_argument("--max-interval", type=int, default=900, help="max seconds between events (default 900)")
+    p.add_argument("--min-presses", type=int, default=10, help="fewest space presses needed (default 10)")
+    p.add_argument("--max-presses", type=int, default=30, help="most space presses needed (default 30)")
+    p.add_argument("--seconds-per-press", type=float, default=0.3,
+                   help="time allowed per required press (default 0.3)")
+    p.add_argument("--min-time", type=float, default=3.0, help="minimum time limit in seconds (default 3)")
+    p.add_argument("--flash-ms", type=int, default=150, help="milliseconds between sprite flashes (default 150)")
+    p.add_argument("--success-seconds", type=float, default=3.0, help="how long the success sprite stays (default 3)")
+    p.add_argument("--fail-seconds", type=float, default=3.0, help="how long the fail sprite stays (default 3)")
+    p.add_argument("--size", type=int, default=256, help="max sprite size in pixels (default 256)")
+    p.add_argument("--no-hud", action="store_true", help="hide the press counter and timer bar")
+    p.add_argument("--no-grab", action="store_true", help="don't grab the keyboard (popup needs focus instead)")
+    p.add_argument("--sprites", metavar="DIR", help="sprite directory to try first")
+    p.add_argument("--now", action="store_true", help="fire the first event after 2 seconds (testing)")
+    a = p.parse_args()
+    a.max_interval = max(a.min_interval, a.max_interval)
+    a.min_presses = max(1, a.min_presses)
+    a.max_presses = max(a.min_presses, a.max_presses)
+    SPRITE_DIRS = default_sprite_dirs(a.sprites)
+
+    css = Gtk.CssProvider(); css.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    app = App(a)
+    app.schedule(first=2 if a.now else None)
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()

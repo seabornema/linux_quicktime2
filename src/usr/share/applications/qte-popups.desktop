@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=QTE Popups (test)
+Comment=Fire a quick-time event in 2 seconds
+Exec=qte-popups --now
+Icon=input-gaming
+Categories=Game;

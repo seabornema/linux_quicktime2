@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=QTE Popups
+Comment=Random quick-time event popups
+Exec=qte-popups
+Terminal=false
+X-GNOME-Autostart-enabled=true
